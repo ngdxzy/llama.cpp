@@ -1,8 +1,8 @@
 #!/bin/sh
 #
 
-# Basedir on device
-basedir=/data/local/tmp/llama.cpp
+# Basedir on deviceautocmd! User ALELintPost
+basedir=/data/local/tmp/llama.cpp.alfred
 
 cli_opts=
 
@@ -49,5 +49,5 @@ adb $adbserial shell " \
       ./$branch/bin/llama-cli --no-mmap -m $basedir/../gguf/$model   \
          --poll 1000 -t 6 --cpu-mask 0xfc --cpu-strict 1             \
          --ctx-size 8192 --batch-size 128 -ctk q8_0 -ctv q8_0 -fa on \
-         -ngl 99 --device $device $cli_opts $@ \
+         -ngl 99 --device $device $cli_opts -no-cnv -p \"what is the most popular cookie in the world?\" \
 "
