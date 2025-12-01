@@ -90,6 +90,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+
     common_init();
 
     auto & sparams = params.sampling;
@@ -136,6 +137,7 @@ int main(int argc, char ** argv) {
     std::vector<common_chat_msg> chat_msgs;
 
     // load the model and apply lora adapter, if any
+    LOG_INF("[FLM] This is the entry point for LLAMA_CPP.\n");
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
     common_init_result llama_init = common_init_from_params(params);
 

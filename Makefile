@@ -1,9 +1,46 @@
-define newline
 
+MODEL ?= Llama-3.2-1B-Instruct-Q4_0.gguf
+DEVICE ?= HTP0
+PROMPT ?= "What is the capital of France?"
+EXTRA_ARGS ?= ""
 
-endef
+CONTAINER_NAME = aLlama
 
-$(error Build system changed:$(newline)\
-The Makefile build has been replaced by CMake.$(newline)$(newline)\
-For build instructions see:$(newline)\
-https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md$(newline)${newline})
+.PHONY: run all push clean dir
+
+TARGET_DIR = pkg-adb/llama.cpp
+TARGET := $(TARGET_DIR)/bin/llama-cli
+BUILD_DIR := build-snapdragon
+
+ANDROID_TARGET_DIR := /data/local/tmp/
+
+RELATED_SRCS := $(wildcard src/*.h src/*.cpp)
+RELATED_SRCS += $(wildcard src/models/*.h src/models/*.cpp)
+RELATED_SRCS += $(wildcard ggml/src/ggml-hexagon/*.h ggml/src/ggml-hexagon/*.c ggml/src/ggml-hexagon/*.cpp)
+RELATED_SRCS += $(wildcard ggml/src/ggml-hexagon/htp/*.h ggml/src/ggml-hexagon/htp/*.c)
+RELATED_SRCS += $(wildcard tools/main/*.h tools/main/*.cpp)
+
+all: $(TARGET)
+	-@echo "Build completed: $(TARGET)"
+# 	-@echo "Watched sources:"
+# 	-@for f in $(RELATED_SRCS); do echo " - $$f"; done
+
+$(TARGET): dir $(RELATED_SRCS)
+	-@docker exec -it $(CONTAINER_NAME) bash -c "cd /workspace/Projects/llama.cpp && cmake --preset arm64-android-snapdragon-release -B build-snapdragon"
+	-@docker exec -it $(CONTAINER_NAME) bash -c "cd /workspace/Projects/llama.cpp && cmake --build build-snapdragon"
+	-@docker exec -it $(CONTAINER_NAME) bash -c "cd /workspace/Projects/llama.cpp && cmake --install build-snapdragon --prefix pkg-adb/llama.cpp"
+
+push: $(TARGET)
+	-@adb push $(TARGET_DIR) $(ANDROID_TARGET_DIR)
+
+run: push
+	M=$(MODEL) D=$(DEVICE) ./scripts/snapdragon/adb/run-cli.sh $(EXTRA_ARGS) -no-cnv -p $(PROMPT)
+
+clean:
+	-@rm -rf $(TARGET_DIR)
+	-@rm -rf $(BUILD_DIR)
+	-@rm -rf pkg-adb/llama.cpp
+
+dir:
+	-@mkdir -p $(TARGET_DIR)
+	-@mkdir -p $(BUILD_DIR)

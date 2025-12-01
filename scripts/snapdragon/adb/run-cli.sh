@@ -2,7 +2,7 @@
 #
 
 # Basedir on deviceautocmd! User ALELintPost
-basedir=/data/local/tmp/llama.cpp.alfred
+basedir=/data/local/tmp/llama.cpp
 
 cli_opts=
 
@@ -39,15 +39,27 @@ nhvx=
 ndev=
 [ "$NDEV" != "" ] && ndev="GGML_HEXAGON_NDEV=$NDEV"
 
+
+for opt in "$@"; do
+  case "$opt" in
+    *" "*)  # contains space
+      cli_opts="$cli_opts \"$opt\""
+      ;;
+    *)
+      cli_opts="$cli_opts $opt"
+      ;;
+  esac
+done
+
 set -x
 
 adb $adbserial shell " \
   cd $basedir; ulimit -c unlimited;        \
-    LD_LIBRARY_PATH=$basedir/$branch/lib   \
+  LD_LIBRARY_PATH=$basedir/$branch/lib   \
     ADSP_LIBRARY_PATH=$basedir/$branch/lib \
     $verbose $experimental $sched $opmask $profile $nhvx $ndev       \
       ./$branch/bin/llama-cli --no-mmap -m $basedir/../gguf/$model   \
          --poll 1000 -t 6 --cpu-mask 0xfc --cpu-strict 1             \
-         --ctx-size 8192 --batch-size 128 -ctk q8_0 -ctv q8_0 -fa on \
-         -ngl 99 --device $device $cli_opts -no-cnv -p \"what is the most popular cookie in the world?\" \
+         --ctx-size 8192 --batch-size 128 -fa off \
+         -ngl 99 --device $device $cli_opts\
 "
