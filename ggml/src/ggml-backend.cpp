@@ -21,6 +21,7 @@
 #include <string.h>
 #include <algorithm>
 #include <vector>
+#include <iostream>
 
 #ifdef __APPLE__
 #include <sys/types.h>
@@ -528,6 +529,7 @@ ggml_backend_buffer_t ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t d
 
 bool ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_tensor * op) {
     GGML_ASSERT(device);
+
     return device->iface.supports_op(device, op);
 }
 
@@ -1068,6 +1070,15 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         if (*node_backend_id == -1) {
             // unassigned node: find the backend with the most supported inputs
             int n_supported_best = -1;
+            std::cout << "[FLM] Node " << node->name << " is unassigned, checking backends..." << std::endl;
+            std::cout << "[FLM] Node src: " << std::endl;
+            for (int jj = 0; jj < GGML_MAX_SRC; jj++) {
+                struct ggml_tensor * src = node->src[jj];
+                if (src == NULL) {
+                    continue;
+                }
+                std::cout << "[FLM]   " << src->name << "(" << src->ne[0] << ", " << src->ne[1] << ")" << std::endl;
+            }
             for (int b = 0; b < sched->n_backends; b++) {
                 if (ggml_backend_supports_op(sched->backends[b], node)) {
                     int n_supported = 0;
@@ -1110,6 +1121,8 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                 }
             }
         }
+
+        std::cout << "[FLM] Node " << node->name << " assigned to backend " << ( *node_backend_id != -1 ? ggml_backend_name(sched->backends[*node_backend_id]) : "none") << std::endl;
     }
 
     // pass 4: assign backends to remaining src from dst and view_src

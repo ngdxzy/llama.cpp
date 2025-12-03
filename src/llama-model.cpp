@@ -24,6 +24,7 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <iostream>
 
 const char * llm_type_name(llm_type type) {
     switch (type) {
@@ -6939,7 +6940,7 @@ static bool buft_supported(ggml_backend_buffer_type_t buft, ggml_backend_dev_t d
             op_tensor->src[i]->buffer = buf.get();
         }
     }
-
+    
     bool op_supported = ggml_backend_dev_supports_op(dev, op_tensor);
 
     return op_supported;

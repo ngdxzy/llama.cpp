@@ -1,6 +1,9 @@
 #include "models.h"
+#include "llama-impl.h"
 
 llm_build_llama::llm_build_llama(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+
+    LLAMA_LOG("%s: [FLM] building LLaMA graph\n", __func__);
     const int64_t n_embd_head = hparams.n_embd_head_v;
 
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);

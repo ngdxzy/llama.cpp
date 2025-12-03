@@ -1014,8 +1014,10 @@ struct common_init_result common_init_from_params(common_params & params) {
     }
 
     common_init_sampler_from_model(model, params.sampling);
+    LOG_INF("%s: [FLM] sampler initialized\n", __func__);
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    LOG_INF("%s: [FLM] vocab initialized\n", __func__);
 
     auto cparams = common_context_params_to_llama(params);
 
@@ -1181,7 +1183,6 @@ struct common_init_result common_init_from_params(common_params & params) {
 
     iparams.model.reset(model);
     iparams.context.reset(lctx);
-
     return iparams;
 }
 

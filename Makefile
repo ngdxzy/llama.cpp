@@ -34,7 +34,7 @@ push: $(TARGET)
 	-@adb push $(TARGET_DIR) $(ANDROID_TARGET_DIR)
 
 run: push
-	M=$(MODEL) D=$(DEVICE) ./scripts/snapdragon/adb/run-cli.sh $(EXTRA_ARGS) -no-cnv -p $(PROMPT)
+	M=$(MODEL) D=$(DEVICE) ./scripts/snapdragon/adb/run-cli.sh $(EXTRA_ARGS) -no-cnv -p $(PROMPT) | tee run.log
 
 clean:
 	-@rm -rf $(TARGET_DIR)

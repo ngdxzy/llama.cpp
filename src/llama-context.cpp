@@ -7,11 +7,13 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-impl.h"
 
 #include <cinttypes>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <iostream>
 
 //
 // llama_context
@@ -162,6 +164,7 @@ llama_context::llama_context(
             if (backend == nullptr) {
                 throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
             }
+            LLAMA_LOG("%s: [FLM] initialized backend for device %s\n", __func__, ggml_backend_dev_name(dev));
             backends.emplace_back(backend);
         }
 
@@ -173,6 +176,7 @@ llama_context::llama_context(
                 if (backend == nullptr) {
                     throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
                 }
+                LLAMA_LOG("%s: [FLM] initialized backend for device %s\n", __func__, ggml_backend_dev_name(dev));
                 backends.emplace_back(backend);
             }
         }
@@ -182,6 +186,7 @@ llama_context::llama_context(
         if (backend_cpu == nullptr) {
             throw std::runtime_error("failed to initialize CPU backend");
         }
+        LLAMA_LOG("%s: [FLM] initialized CPU backend\n", __func__);
         backends.emplace_back(backend_cpu);
 
         // create a list of the set_n_threads functions in the backends
@@ -225,6 +230,7 @@ llama_context::llama_context(
     // init backends
     if (!hparams.vocab_only) {
         LLAMA_LOG_DEBUG("%s: enumerating backends\n", __func__);
+        LLAMA_LOG_DEBUG("%s: [FLM] number of backends = %zu\n", __func__, backends.size());
 
         backend_buft.clear();
         backend_ptrs.clear();
@@ -232,6 +238,8 @@ llama_context::llama_context(
         for (auto & backend : backends) {
             auto * buft = ggml_backend_get_default_buffer_type(backend.get());
             auto backend_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
+
+            LLAMA_LOG("%s: [FLM] backend type = %d\n", __func__, backend_type);
 
             if (backend_type == GGML_BACKEND_DEVICE_TYPE_CPU && !model.devices.empty()) {
                 // use the host buffer of the first device CPU for faster transfer of the intermediate state
@@ -310,6 +318,7 @@ llama_context::llama_context(
 
         // resolve automatic Flash Attention use
         if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
+            LLAMA_LOG("%s: [FLM] checking Flash Attention support across devices\n", __func__);
             auto * gf = graph_reserve(1, n_seqs, n_outputs, mctx.get(), true);
             if (!gf) {
                 throw std::runtime_error("failed to split graph for Flash Attention check");
@@ -779,7 +788,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
         //const auto t_start_us = ggml_time_us();
-
+        LLAMA_LOG("%s: [FLM] building new graph\n", __func__);
         gf = model.build_graph(gparams);
 
         //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
@@ -1398,7 +1407,7 @@ llm_graph_result * llama_context::get_gf_res_reserve() const {
 }
 
 ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only) {
-    LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
+    LLAMA_LOG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
     GGML_ASSERT(n_outputs >= 1);
 
     if (n_tokens % n_seqs != 0) {
@@ -1428,6 +1437,7 @@ ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, u
 
     res->reset();
 
+    LLAMA_LOG("%s: [FLM] building reserved graph\n", __func__);
     auto * gf = model.build_graph(gparams);
 
     this->n_outputs = save_n_outputs;
@@ -1497,6 +1507,7 @@ ggml_status llama_context::graph_compute(
 
 llm_graph_cb llama_context::graph_get_cb() const {
     return [&](const llama_ubatch & ubatch, ggml_tensor * cur, const char * name, int il) {
+
         if (il >= 0) {
             ggml_format_name(cur, "%s-%d", name, il);
         } else {
@@ -2199,7 +2210,7 @@ void llama_context::opt_epoch_iter(
             const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT);
 
             res->reset();
-
+            LLAMA_LOG("%s: [FLM] building graph for opt epoch iter\n", __func__);
             auto * gf = model.build_graph(gparams);
 
             struct ggml_context * ctx_compute_opt;

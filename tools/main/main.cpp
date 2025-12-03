@@ -140,9 +140,12 @@ int main(int argc, char ** argv) {
     LOG_INF("[FLM] This is the entry point for LLAMA_CPP.\n");
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
     common_init_result llama_init = common_init_from_params(params);
+    LOG_INF("%s: [FLM] model and context initialized successfully\n", __func__);
 
     model = llama_init.model.get();
+    LOG_INF("%s: [FLM] model loaded successfully\n", __func__);
     ctx = llama_init.context.get();
+    LOG_INF("%s: [FLM] context created successfully\n", __func__);
 
     if (model == NULL) {
         LOG_ERR("%s: error: unable to load model\n", __func__);

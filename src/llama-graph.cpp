@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
@@ -1462,7 +1463,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     }
 
     ggml_build_forward_expand(gf, cur);
-
     return cur;
 }
 

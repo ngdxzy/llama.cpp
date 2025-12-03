@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <stdexcept>
+#include <iostream>
 
 #ifdef _WIN32
 #    include <sal.h>
@@ -1951,7 +1952,9 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
     if (!ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
         return false;
     }
-
+    std::cout << "[FLM] mul_mat " << src0->name << "(" << src0->ne[0] << ", " << src0->ne[1]  << ") x " 
+                << src1->name << "(" << src1->ne[0] << ", " << src1->ne[1]  << ") -> " 
+                << dst->name << "(" << dst->ne[0] << ", " << dst->ne[1]  << ")" << std::endl;
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
@@ -2910,7 +2913,6 @@ static inline int last_compute_op(ggml_cgraph * graph) {
 
 static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, ggml_cgraph * graph) {
     auto sess = static_cast<ggml_hexagon_session *>(backend->context);
-
     HEX_VERBOSE("ggml-hex: %s graph-compute n_nodes %d\n", sess->name.c_str(), graph->n_nodes);
 
     const int last = last_compute_op(graph);
@@ -2919,7 +2921,6 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
 
     for (int i = 0; i < graph->n_nodes; ++i) {
         ggml_tensor * node = graph->nodes[i];
-
         if (!is_compute_op(node)) {
             continue;
         }
@@ -3255,7 +3256,6 @@ static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_repack_buffer_
 
 static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     auto sess = static_cast<ggml_hexagon_session *>(dev->context);
-
     bool supp = false;
 
     switch (op->op) {
@@ -3329,6 +3329,8 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
         HEX_VERBOSE("ggml-hex: %s device-supports-op %s : %s : %s : %s : %s : %s : (%d)\n", sess->name.c_str(),
                     ggml_op_name(op->op), names, dims, types, strides, buffs, (int) supp);
     }
+    if (!supp)
+        std::cout << "\t[FLM] " << sess->name.c_str() << " does NOT support op " << ggml_op_name(op->op) << std::endl;
 
     return supp;
 
