@@ -1952,9 +1952,14 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
     if (!ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
         return false;
     }
-    std::cout << "[FLM] mul_mat " << src0->name << "(" << src0->ne[0] << ", " << src0->ne[1]  << ") x " 
-                << src1->name << "(" << src1->ne[0] << ", " << src1->ne[1]  << ") -> " 
-                << dst->name << "(" << dst->ne[0] << ", " << dst->ne[1]  << ")" << std::endl;
+    // std::cout << "[FLM] mul_mat " << src0->name << "(" << src0->ne[0] << ", " << src0->ne[1]  << ") x " 
+    //             << src1->name << "(" << src1->ne[0] << ", " << src1->ne[1]  << ") -> " 
+    //             << dst->name << "(" << dst->ne[0] << ", " << dst->ne[1]  << ")" << std::endl;
+
+    GGML_LOG_INFO("[FLM] ggml-hex: mul_mat %s (%ld x %ld) x %s (%ld x %ld) -> %s (%ld x %ld)\n",
+            src0->name, src0->ne[0], src0->ne[1],
+            src1->name, src1->ne[0], src1->ne[1],
+            dst->name,  dst->ne[0],  dst->ne[1]);
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
@@ -2330,6 +2335,10 @@ static void ggml_hexagon_mul_mat(const struct ggml_tensor * op, uint32_t flags) 
     const struct ggml_tensor * src1 = op->src[1];
     const struct ggml_tensor * dst  = op;
 
+    GGML_LOG_INFO("[FLM] ggml-hex: mul_mat %s (%ld x %ld) x %s (%ld x %ld) -> %s (%ld x %ld)\n",
+            src0->name, src0->ne[0], src0->ne[1],
+            src1->name, src1->ne[0], src1->ne[1],
+            dst->name,  dst->ne[0],  dst->ne[1]);
     uint64_t t1, t2;
     t1 = ggml_time_us();
 

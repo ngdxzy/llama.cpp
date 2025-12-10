@@ -307,6 +307,130 @@ static inline HVX_Vector hvx_vec_rmpy_x8_nloe(HVX_Vector_x8 x, HVX_Vector_x8 y, 
     return hvx_vec_rmpy_x8_n(x, y, 1024);
 }
 
+// *** dynamic quant
+
+static inline void quantize_block_fp32_q8x4(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_d) {
+    assert((unsigned long) x % 128 == 0);
+    assert((unsigned long) y_q % 128 == 0);
+
+    HVX_Vector * vx = (HVX_Vector *) x;
+
+    // Load and convert into QF32
+    HVX_Vector zero   = Q6_V_vsplat_R(0);
+    HVX_Vector vx0_qf = Q6_Vqf32_vsub_VsfVsf(vx[0], zero);  // 32 elements
+    HVX_Vector vx1_qf = Q6_Vqf32_vsub_VsfVsf(vx[1], zero);  // 32 elements
+    HVX_Vector vx2_qf = Q6_Vqf32_vsub_VsfVsf(vx[2], zero);  // 32 elements
+    HVX_Vector vx3_qf = Q6_Vqf32_vsub_VsfVsf(vx[3], zero);  // 32 elements
+
+    // Convert into fp16
+    HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
+    HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
+
+    // Compute max and scale
+    HVX_Vector vmax_hf = hvx_vec_reduce_max_fp16(hvx_vec_abs_fp16(vx01_hf));
+    vmax_hf            = hvx_vec_reduce_max2_fp16(hvx_vec_abs_fp16(vx23_hf), vmax_hf);
+
+    // Replicate first fp16 scale across all lanes
+    HVX_Vector ctrl = *(const HVX_Vector *) repl_1x_fp16;
+    vmax_hf         = Q6_V_vdelta_VV(vmax_hf, ctrl);
+
+    HVX_Vector vd_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
+    HVX_Vector vd_hf   = Q6_Vhf_equals_Vqf16(vd_qf16);
+
+    *(HVX_UVector *) y_d = vd_hf;
+
+    // Divide input by the scale
+    HVX_Vector vd_inv_hf = hvx_vec_inverse_fp16(vd_hf);
+    vx01_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx01_hf, vd_inv_hf));
+    vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd_inv_hf));
+
+    // Convert to int8
+    HVX_Vector vx01_i16 = hvx_vec_i16_from_hf_rnd_sat(vx01_hf);
+    HVX_Vector vx23_i16 = hvx_vec_i16_from_hf_rnd_sat(vx23_hf);
+    HVX_Vector vx_i8    = Q6_Vb_vpack_VhVh_sat(vx23_i16, vx01_i16);
+
+    *(HVX_Vector *) y_q = vx_i8;
+}
+
+
+
+// Overrides input x
+static void quantize_row_fp32_q8x4x2(float * restrict x, uint8_t * restrict y, uint32_t k) {
+    assert(k % 32 == 0);
+    const uint32_t qk = QK_Q8_0x4x2;
+    const uint32_t nb = (k + qk - 1) / qk;
+
+    const uint32_t qrow_size = k;              // int8
+
+    const uint32_t dblk_size = 8 * 2;          // 8x __fp16
+    const uint32_t qblk_size = QK_Q8_0x4x2;    // int8
+
+    uint8_t * restrict y_q = (y + 0);          // quants first
+    uint8_t * restrict y_d = (y + qrow_size);  // then scales
+
+    // Temp scales override input since we're working off of the aligned temp buffer in VTCM
+    uint8_t * restrict t_d = (uint8_t *) x;
+
+    for (uint32_t i = 0; i < nb; i++) {
+        quantize_block_fp32_q8x4(x + (i * 2 + 0) * qk / 2, y_q + (i * 2 + 0) * qblk_size / 2,
+                                 t_d + (i * 2 + 0) * dblk_size / 2);
+        quantize_block_fp32_q8x4(x + (i * 2 + 1) * qk / 2, y_q + (i * 2 + 1) * qblk_size / 2,
+                                 t_d + (i * 2 + 1) * dblk_size / 2);
+    }
+
+    // now copy the scales into final location
+    hvx_copy_fp16_ua(y_d, t_d, nb * 8);
+}
+static void quantize_fp32_q8x4x2(const struct htp_tensor * src,
+                                 uint8_t * restrict dst,
+                                 struct htp_spad * spad,
+                                 uint32_t          nth,
+                                 uint32_t          ith,
+                                 uint32_t          nrows_per_thread) {
+    uint64_t t1 = HAP_perf_get_qtimer_count();
+
+    const uint32_t ne0 = src->ne[0];
+    const uint32_t ne1 = src->ne[1];
+    const uint32_t ne2 = src->ne[2];
+    const uint32_t ne3 = src->ne[3];
+
+    const uint32_t nrows = ne1 * ne2 * ne3;                             // total n_rows
+
+    const uint32_t ir_first = nrows_per_thread * ith;                   // first row
+    const uint32_t ir_last  = MIN(ir_first + nrows_per_thread, nrows);  // last row
+
+    const size_t src_row_size = src->nb[1];
+    const size_t dst_row_size = q8x4x2_row_size(ne0);
+
+    uint8_t * restrict src_data = (uint8_t *) src->data + (src_row_size * ir_first);
+    uint8_t * restrict dst_data = (uint8_t *) dst + (dst_row_size * ir_first);
+    uint8_t * restrict tmp_data = (uint8_t *) spad->data + (spad->size_per_thread * ith);
+
+    const size_t src_row_size_padded = htp_round_up(src_row_size, QK_Q8_0x4x2 * sizeof(float));
+    memset(tmp_data, 0, src_row_size_padded);  // zero-out temp row data for padding
+
+    for (uint32_t i = ir_first; i < ir_last; ++i) {
+        htp_l2fetch(src_data, 2, src_row_size, src_row_size);
+        hvx_copy_fp32_aa(tmp_data, src_data, ne0);
+
+        // FARF(HIGH, "quantize-q8x4-row: %u\n", i);
+        quantize_row_fp32_q8x4x2((float *) tmp_data, dst_data, ne0);
+        dst_data += dst_row_size;
+        src_data += src_row_size;
+    }
+
+    uint64_t t2 = HAP_perf_get_qtimer_count();
+
+    FARF(HIGH, "quantize-fp32-q8x4: %u/%u : n-rows %u (%u:%u) row-size %u -> %u usec %u\n", ith, nth, nrows, ir_first,
+         ir_last, src_row_size, dst_row_size, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+}
+
+static void htp_quantize_fp32_q8x4x2(unsigned int n, unsigned int i, void * data) {
+    struct htp_ops_context * octx = data;
+    quantize_fp32_q8x4x2(&octx->src1, octx->src1_spad.data, &octx->src0_spad, n, i, octx->src1_nrows_per_thread);
+}
+
+
 static void vec_dot_q4x4x2_q8x4x2(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
     assert(n % 32 == 0);  // min sub-block size
     assert((unsigned long) vx % 128 == 0);
@@ -1152,6 +1276,111 @@ static void matmul(struct htp_matmul_type * mt,
          (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
 }
 
+// q8x4 src1 tensor is already in VTCM spad
+static void matmul_f32_f32(struct htp_matmul_type * mt,
+        struct htp_tensor * restrict src0,
+        struct htp_tensor * restrict src1,
+        struct htp_tensor * restrict dst,
+        struct htp_spad * restrict src0_spad,
+        struct htp_spad * restrict src1_spad,
+        struct htp_spad * restrict dst_spad,
+        uint32_t    nth,
+        uint32_t    ith,
+        uint32_t    src0_nrows_per_thread,
+        dma_queue * dma_queue) {
+    htp_matmul_preamble;
+
+    const uint32_t src0_nrows = ne01 * ne02 * ne03;  // src0 rows
+    const uint32_t src1_nrows = ne11 * ne12 * ne13;  // src1 rows
+
+    const uint32_t src0_start_row  = src0_nrows_per_thread * ith;
+    const uint32_t src0_end_row    = MIN(src0_start_row + src0_nrows_per_thread, src0_nrows);
+    const uint32_t src0_end_row_x2 = src0_start_row + ((src0_end_row - src0_start_row) & ~1U);
+
+    // no work for this thread
+    if (src0_start_row >= src0_end_row) {
+        return;
+    }
+
+    const size_t dst_row_size  = nb1;
+    const size_t src0_row_size = nb01;
+    const size_t src1_row_size = q8x4x2_row_size(ne10);
+    FARF(HIGH, "matmul_f32_f32: src0_row_size %u src1_row_size %u\n", src0_row_size, src1_row_size);
+    const size_t src0_row_size_padded = htp_round_up(src0_row_size + q8x4x2_row_size(ne00), 128);
+    FARF(HIGH, "src0_row_size_padded %u\n", src0_row_size_padded);
+
+    // Per-thread VTCM scratchpads for all tensors
+    // Note that the entire src1 tensor is already in VTCM
+    // For other tensors we allocate N rows per thread, padded to HVX vector size
+    uint8_t * restrict spad_dst  = dst_spad->data + dst_spad->size_per_thread * ith;
+    uint8_t * restrict spad_src0 = src0_spad->data + src0_spad->size_per_thread * ith;
+    uint8_t * restrict src1_data = src1_spad->data;
+    FARF(HIGH, "matmul_f32_f32: spad_src0.size_per_thread %u\n", src0_spad->size_per_thread);
+    FARF(HIGH, "ne00: %u\n", ne00);
+    volatile uint64_t t1, t2;
+    t1 = HAP_perf_get_qtimer_count();
+
+    const uint8_t * restrict src0_row = (const uint8_t *) src0->data;
+
+    // Prefill spad with src0 rows
+    #pragma unroll(4)
+    for (uint32_t ir0 = src0_start_row; ir0 < src0_end_row_x2; ir0 += 2) {
+        const int is0 = (ir0 - src0_start_row);
+        if (is0 >= HTP_SPAD_SRC0_NROWS) {
+            break;
+        }
+        dma_queue_push(dma_queue, spad_src0 + is0 * src0_row_size_padded, src0_row + ir0 * src0_row_size,
+                       src0_row_size_padded, src0_row_size, 2);
+    }
+
+    // Process src0 rows
+    for (uint32_t ir0 = src0_start_row; ir0 < src0_end_row_x2; ir0 += 2) {
+        const uint8_t * ss0 = dma_queue_pop(dma_queue);
+
+        #pragma unroll(2)
+        for (uint32_t ir1 = 0; ir1 < src1_nrows; ++ir1) {
+            uint8_t * s_iter = (uint8_t *) ss0;
+            quantize_row_fp32_q8x4x2((float *) s_iter, s_iter + src0_row_size, ne00);
+            s_iter += src0_row_size_padded;
+            quantize_row_fp32_q8x4x2((float *) s_iter, s_iter + src0_row_size, ne00);
+            const uint8_t * restrict src1_col = (const uint8_t *) (src1_data + ir1 * src1_row_size);
+            float * restrict dst_row          = (float *) (dst->data + (ir1 * dst_row_size));
+            mt->vec_dot_rx2(ne00, &dst_row[ir0], (uint8_t *) ss0 + src0_row_size, src0_row_size_padded, src1_col);
+        }
+
+        // Prefetch next (n + spad_nrows) row
+        const int pr0 = (ir0 + HTP_SPAD_SRC0_NROWS);
+        const int is0 = (pr0 - src0_start_row) % HTP_SPAD_SRC0_NROWS;
+        if (pr0 < src0_end_row_x2) {
+            dma_queue_push(dma_queue, spad_src0 + is0 * src0_row_size_padded, src0_row + pr0 * src0_row_size,
+                           src0_row_size_padded, src0_row_size, 2);
+        }
+    }
+
+    // Process the last row (if any)
+    if (src0_end_row != src0_end_row_x2) {
+        FARF(HIGH, "matmul_f32_f32: processing last row\n");
+        uint32_t  ir0 = src0_end_row_x2;
+        const int is0 = (ir0 - src0_start_row);
+        dma_queue_push(dma_queue, spad_src0 + is0 * src0_row_size_padded, src0_row + ir0 * src0_row_size,
+                       src0_row_size_padded, src0_row_size, 1);
+        const uint8_t * ss0 = dma_queue_pop(dma_queue);
+
+        #pragma unroll(2)
+        for (uint32_t ir1 = 0; ir1 < src1_nrows; ++ir1) {
+            const uint8_t * restrict src1_col = (const uint8_t *) (src1_data + ir1 * src1_row_size);
+            float * restrict dst_row          = (float *) (dst->data + (ir1 * dst_row_size));
+            mt->vec_dot(ne00, &dst_row[ir0], ss0, src1_col);
+        }
+    }
+
+    t2 = HAP_perf_get_qtimer_count();
+
+    FARF(HIGH, "matmul-%s %d/%d: %ux%ux%ux%u (%u:%u) * %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n", mt->type, ith, nth,
+         src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], src0_start_row, src0_end_row, src1->ne[0], src1->ne[1],
+         src1->ne[2], src1->ne[3], dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+         (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+}
 // q8x4x2 src1 tensor is already in VTCM spad
 static void matvec(struct htp_matmul_type * mt,
                    struct htp_tensor * restrict src0,
@@ -1583,127 +1812,6 @@ static void matmul_f16_f32(struct htp_tensor * restrict src0,
          (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
 }
 
-// *** dynamic quant
-
-static inline void quantize_block_fp32_q8x4(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_d) {
-    assert((unsigned long) x % 128 == 0);
-    assert((unsigned long) y_q % 128 == 0);
-
-    HVX_Vector * vx = (HVX_Vector *) x;
-
-    // Load and convert into QF32
-    HVX_Vector zero   = Q6_V_vsplat_R(0);
-    HVX_Vector vx0_qf = Q6_Vqf32_vsub_VsfVsf(vx[0], zero);  // 32 elements
-    HVX_Vector vx1_qf = Q6_Vqf32_vsub_VsfVsf(vx[1], zero);  // 32 elements
-    HVX_Vector vx2_qf = Q6_Vqf32_vsub_VsfVsf(vx[2], zero);  // 32 elements
-    HVX_Vector vx3_qf = Q6_Vqf32_vsub_VsfVsf(vx[3], zero);  // 32 elements
-
-    // Convert into fp16
-    HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
-    HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
-
-    // Compute max and scale
-    HVX_Vector vmax_hf = hvx_vec_reduce_max_fp16(hvx_vec_abs_fp16(vx01_hf));
-    vmax_hf            = hvx_vec_reduce_max2_fp16(hvx_vec_abs_fp16(vx23_hf), vmax_hf);
-
-    // Replicate first fp16 scale across all lanes
-    HVX_Vector ctrl = *(const HVX_Vector *) repl_1x_fp16;
-    vmax_hf         = Q6_V_vdelta_VV(vmax_hf, ctrl);
-
-    HVX_Vector vd_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
-    HVX_Vector vd_hf   = Q6_Vhf_equals_Vqf16(vd_qf16);
-
-    *(HVX_UVector *) y_d = vd_hf;
-
-    // Divide input by the scale
-    HVX_Vector vd_inv_hf = hvx_vec_inverse_fp16(vd_hf);
-    vx01_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx01_hf, vd_inv_hf));
-    vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd_inv_hf));
-
-    // Convert to int8
-    HVX_Vector vx01_i16 = hvx_vec_i16_from_hf_rnd_sat(vx01_hf);
-    HVX_Vector vx23_i16 = hvx_vec_i16_from_hf_rnd_sat(vx23_hf);
-    HVX_Vector vx_i8    = Q6_Vb_vpack_VhVh_sat(vx23_i16, vx01_i16);
-
-    *(HVX_Vector *) y_q = vx_i8;
-}
-
-// Overrides input x
-static void quantize_row_fp32_q8x4x2(float * restrict x, uint8_t * restrict y, uint32_t k) {
-    assert(k % 32 == 0);
-    const uint32_t qk = QK_Q8_0x4x2;
-    const uint32_t nb = (k + qk - 1) / qk;
-
-    const uint32_t qrow_size = k;              // int8
-
-    const uint32_t dblk_size = 8 * 2;          // 8x __fp16
-    const uint32_t qblk_size = QK_Q8_0x4x2;    // int8
-
-    uint8_t * restrict y_q = (y + 0);          // quants first
-    uint8_t * restrict y_d = (y + qrow_size);  // then scales
-
-    // Temp scales override input since we're working off of the aligned temp buffer in VTCM
-    uint8_t * restrict t_d = (uint8_t *) x;
-
-    for (uint32_t i = 0; i < nb; i++) {
-        quantize_block_fp32_q8x4(x + (i * 2 + 0) * qk / 2, y_q + (i * 2 + 0) * qblk_size / 2,
-                                 t_d + (i * 2 + 0) * dblk_size / 2);
-        quantize_block_fp32_q8x4(x + (i * 2 + 1) * qk / 2, y_q + (i * 2 + 1) * qblk_size / 2,
-                                 t_d + (i * 2 + 1) * dblk_size / 2);
-    }
-
-    // now copy the scales into final location
-    hvx_copy_fp16_ua(y_d, t_d, nb * 8);
-}
-
-static void quantize_fp32_q8x4x2(const struct htp_tensor * src,
-                                 uint8_t * restrict dst,
-                                 struct htp_spad * spad,
-                                 uint32_t          nth,
-                                 uint32_t          ith,
-                                 uint32_t          nrows_per_thread) {
-    uint64_t t1 = HAP_perf_get_qtimer_count();
-
-    const uint32_t ne0 = src->ne[0];
-    const uint32_t ne1 = src->ne[1];
-    const uint32_t ne2 = src->ne[2];
-    const uint32_t ne3 = src->ne[3];
-
-    const uint32_t nrows = ne1 * ne2 * ne3;                             // total n_rows
-
-    const uint32_t ir_first = nrows_per_thread * ith;                   // first row
-    const uint32_t ir_last  = MIN(ir_first + nrows_per_thread, nrows);  // last row
-
-    const size_t src_row_size = src->nb[1];
-    const size_t dst_row_size = q8x4x2_row_size(ne0);
-
-    uint8_t * restrict src_data = (uint8_t *) src->data + (src_row_size * ir_first);
-    uint8_t * restrict dst_data = (uint8_t *) dst + (dst_row_size * ir_first);
-    uint8_t * restrict tmp_data = (uint8_t *) spad->data + (spad->size_per_thread * ith);
-
-    const size_t src_row_size_padded = htp_round_up(src_row_size, QK_Q8_0x4x2 * sizeof(float));
-    memset(tmp_data, 0, src_row_size_padded);  // zero-out temp row data for padding
-
-    for (uint32_t i = ir_first; i < ir_last; ++i) {
-        htp_l2fetch(src_data, 2, src_row_size, src_row_size);
-        hvx_copy_fp32_aa(tmp_data, src_data, ne0);
-
-        // FARF(HIGH, "quantize-q8x4-row: %u\n", i);
-        quantize_row_fp32_q8x4x2((float *) tmp_data, dst_data, ne0);
-        dst_data += dst_row_size;
-        src_data += src_row_size;
-    }
-
-    uint64_t t2 = HAP_perf_get_qtimer_count();
-
-    FARF(HIGH, "quantize-fp32-q8x4: %u/%u : n-rows %u (%u:%u) row-size %u -> %u usec %u\n", ith, nth, nrows, ir_first,
-         ir_last, src_row_size, dst_row_size, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
-}
-
-static void htp_quantize_fp32_q8x4x2(unsigned int n, unsigned int i, void * data) {
-    struct htp_ops_context * octx = data;
-    quantize_fp32_q8x4x2(&octx->src1, octx->src1_spad.data, &octx->src0_spad, n, i, octx->src1_nrows_per_thread);
-}
 
 // ** matmul callbacks for worker_pool
 
@@ -1784,6 +1892,18 @@ static void htp_matmul_f16_f32(unsigned int n, unsigned int i, void * data) {
     matmul_f16_f32(&octx->src0, &octx->src1, &octx->dst, &octx->src0_spad, &octx->src1_spad, &octx->dst_spad, n, i,
                    octx->src0_nrows_per_thread, octx->ctx->dma[i]);
 }
+
+static void htp_matmul_f32_f32(unsigned int n, unsigned int i, void * data) {
+    struct htp_ops_context * octx = data;
+
+    struct htp_matmul_type mt;
+    mt.type        = "q8x4x2-q8x4x2";
+    mt.vec_dot     = vec_dot_q8x4x2_q8x4x2;
+    mt.vec_dot_rx2 = vec_dot_q8x4x2_q8x4x2_rx2;
+    matmul_f32_f32(&mt, &octx->src0, &octx->src1, &octx->dst, &octx->src0_spad, &octx->src1_spad, &octx->dst_spad, n, i,
+                   octx->src0_nrows_per_thread, octx->ctx->dma[i]);
+}
+
 
 // ** matmul-id callbacks for worker_pool
 
@@ -1988,6 +2108,37 @@ int op_matmul(struct htp_ops_context * octx) {
             octx->dst_spad.size  = octx->dst_spad.size_per_thread * octx->n_threads;
 
             need_quant = false;
+            break;
+
+        case HTP_TYPE_F32:
+            op_type        = "q8x4x2-fp32";
+            quant_job_func = htp_quantize_fp32_q8x4x2;
+            if (src1_nrows > 1) {
+                matmul_job_func = htp_matmul_f32_f32;
+            } else {
+                matmul_job_func = htp_matvec_q8x4x2_q8x4x2;
+            }
+
+            src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
+            size_t src0_vctm_row_size = htp_round_up(q8x4x2_row_size(ne00) + src0_row_size_padded, 128);
+            FARF(HIGH, "src0_vctm_row_size %u\n", src0_vctm_row_size);
+
+            // Entire src1 tensor is placed into the VTCM
+            // For other tensors we allocate N rows per thread, padded to HVX vector size
+
+            octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
+            octx->src0_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_vctm_row_size, 256);
+            octx->src1_spad.size_per_thread = htp_round_up(src1_row_size * src1_nrows, 256);
+
+            // src0 spad is also used in dynamic quantizer to store padded src1 rows
+            src1_row_size_padded = htp_round_up(src1_row_size, QK_Q8_0x4x2 * sizeof(float));
+            if (octx->src0_spad.size_per_thread < src1_row_size_padded) {
+                octx->src0_spad.size_per_thread = src1_row_size_padded;
+            }
+
+            octx->src1_spad.size = octx->src1_spad.size_per_thread;
+            octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
+            octx->dst_spad.size  = octx->dst_spad.size_per_thread * octx->n_threads;
             break;
 
         default:

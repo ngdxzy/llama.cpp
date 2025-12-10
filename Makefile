@@ -11,8 +11,13 @@ CONTAINER_NAME = aLlama
 TARGET_DIR = pkg-adb/llama.cpp
 TARGET := $(TARGET_DIR)/bin/llama-cli
 BUILD_DIR := build-snapdragon
+LLAMA_CPP_DIR := workspace/llama.cpp
 
 ANDROID_TARGET_DIR := /data/local/tmp/
+
+HW_DEVICE := RFCY919LGLD
+
+EXTRA_ARGS += -s $(HW_DEVICE) 
 
 RELATED_SRCS := $(wildcard src/*.h src/*.cpp)
 RELATED_SRCS += $(wildcard src/models/*.h src/models/*.cpp)
@@ -26,12 +31,12 @@ all: $(TARGET)
 # 	-@for f in $(RELATED_SRCS); do echo " - $$f"; done
 
 $(TARGET): dir $(RELATED_SRCS)
-	-@docker exec -it $(CONTAINER_NAME) bash -c "cd /workspace/Projects/llama.cpp && cmake --preset arm64-android-snapdragon-release -B build-snapdragon"
-	-@docker exec -it $(CONTAINER_NAME) bash -c "cd /workspace/Projects/llama.cpp && cmake --build build-snapdragon"
-	-@docker exec -it $(CONTAINER_NAME) bash -c "cd /workspace/Projects/llama.cpp && cmake --install build-snapdragon --prefix pkg-adb/llama.cpp"
+	-@docker exec -it $(CONTAINER_NAME) bash -c "cd $(LLAMA_CPP_DIR) && cmake --preset arm64-android-snapdragon-release -B build-snapdragon"
+	-@docker exec -it $(CONTAINER_NAME) bash -c "cd $(LLAMA_CPP_DIR) && cmake --build build-snapdragon"
+	-@docker exec -it $(CONTAINER_NAME) bash -c "cd $(LLAMA_CPP_DIR) && cmake --install build-snapdragon --prefix pkg-adb/llama.cpp"
 
 push: $(TARGET)
-	-@adb push $(TARGET_DIR) $(ANDROID_TARGET_DIR)
+	-@adb -s $(HW_DEVICE) push $(TARGET_DIR) $(ANDROID_TARGET_DIR)
 
 run: push
 	M=$(MODEL) D=$(DEVICE) ./scripts/snapdragon/adb/run-cli.sh $(EXTRA_ARGS) -no-cnv -p $(PROMPT) | tee run.log
