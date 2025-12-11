@@ -1628,6 +1628,58 @@ static inline void quantize_block_fp32_q8x4(float * restrict x, uint8_t * restri
     *(HVX_Vector *) y_q = vx_i8;
 }
 
+static inline void quantize_block_fp32_q8x2(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_d) {
+    assert((unsigned long) x % 128 == 0);
+    assert((unsigned long) y_q % 128 == 0);
+
+    HVX_Vector * vx = (HVX_Vector *) x;
+
+    // Load and convert into QF32
+    HVX_Vector zero   = Q6_V_vsplat_R(0);
+    HVX_Vector vx0_qf = Q6_Vqf32_vsub_VsfVsf(vx[0], zero);  // 32 elements
+    HVX_Vector vx1_qf = Q6_Vqf32_vsub_VsfVsf(vx[1], zero);  // 32 elements
+    HVX_Vector vx2_qf = Q6_Vqf32_vsub_VsfVsf(vx[2], zero);  // 32 elements
+    HVX_Vector vx3_qf = Q6_Vqf32_vsub_VsfVsf(vx[3], zero);  // 32 elements
+
+    // Convert into fp16
+    HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
+    HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
+
+    // Compute max and scale
+    HVX_Vector vmax01_hf = hvx_vec_reduce_max_fp16(hvx_vec_abs_fp16(vx01_hf));
+    HVX_Vector vmax23_hf = hvx_vec_reduce_max_fp16(hvx_vec_abs_fp16(vx23_hf));
+
+    // Replicate first fp16 scale across all lanes
+    HVX_Vector ctrl = *(const HVX_Vector *) repl_1x_fp16;
+    vmax01_hf         = Q6_V_vdelta_VV(vmax01_hf, ctrl);
+    vmax23_hf         = Q6_V_vdelta_VV(vmax23_hf, ctrl);
+
+    HVX_Vector vd01_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax01_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
+    HVX_Vector vd23_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax23_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
+    HVX_Vector vd01_hf   = Q6_Vhf_equals_Vqf16(vd01_qf16);
+    HVX_Vector vd23_hf   = Q6_Vhf_equals_Vqf16(vd23_qf16);
+
+    // *(HVX_UVector *) y_d = vd01_hf;
+    // *(HVX_UVector *) y_d = vd23_hf;
+
+    hvx_vec_store_u(y_d, 4, vd01_hf);
+    hvx_vec_store_u(y_d + 4, 4, vd23_hf);
+
+    // Divide input by the scale
+    HVX_Vector vd01_inv_hf = hvx_vec_inverse_fp16(vd01_hf);
+    HVX_Vector vd23_inv_hf = hvx_vec_inverse_fp16(vd23_hf);
+    vx01_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx01_hf, vd01_inv_hf));
+    vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd23_inv_hf));
+
+    // Convert to int8
+    HVX_Vector vx01_i16 = hvx_vec_i16_from_hf_rnd_sat(vx01_hf);
+    HVX_Vector vx23_i16 = hvx_vec_i16_from_hf_rnd_sat(vx23_hf);
+    HVX_Vector vx_i8    = Q6_Vb_vpack_VhVh_sat(vx23_i16, vx01_i16);
+
+    *(HVX_Vector *) y_q = vx_i8;
+}
+
+
 // Overrides input x
 static void quantize_row_fp32_q8x4x2(float * restrict x, uint8_t * restrict y, uint32_t k) {
     assert(k % 32 == 0);
